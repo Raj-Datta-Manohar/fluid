@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"os"
 	"time"
 
 	raft "github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb"
 
 	"github.com/raj/fluid/pkg/types"
 )
@@ -21,6 +18,7 @@ import (
 type RaftAdapter struct {
 	logger *slog.Logger
 	raft   *raft.Raft
+	fsm    *FSM
 
 	handlers map[string][]func(any)
 }
@@ -54,6 +52,17 @@ func (r *RaftAdapter) IsLeader() bool {
 	return r.raft.State() == raft.Leader
 }
 
+// StateSnapshot returns a deep copy of FSM in-memory state for warming caches.
+func (r *RaftAdapter) StateSnapshot() map[string][]types.ServiceEndpoint {
+	if r.fsm == nil {
+		return nil
+	}
+	return r.fsm.copyState()
+}
+
+// Raft returns the underlying *raft.Raft instance. Use for admin operations.
+func (r *RaftAdapter) Raft() *raft.Raft { return r.raft }
+
 // WaitForLeader blocks until a leader is known or ctx is done.
 func (r *RaftAdapter) WaitForLeader(ctx context.Context) error {
 	if r.raft == nil {
@@ -71,6 +80,29 @@ func (r *RaftAdapter) WaitForLeader(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// AddVoter adds a server to the cluster. Must be called on the leader.
+func (r *RaftAdapter) AddVoter(ctx context.Context, id string, addr string) error {
+	if r.raft == nil {
+		return errors.New("raft instance not set")
+	}
+	if r.raft.State() != raft.Leader {
+		return &NotLeaderError{LeaderAddr: r.LeaderAddress()}
+	}
+	f := r.raft.AddVoter(raft.ServerID(id), raft.ServerAddress(addr), 0, 5*time.Second)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-asyncErr(f):
+		return err
+	}
+}
+
+func asyncErr(f raft.Future) <-chan error {
+	ch := make(chan error, 1)
+	go func() { ch <- f.Error() }()
+	return ch
 }
 
 func (r *RaftAdapter) ProposeEvent(ctx context.Context, event any) error {
@@ -119,28 +151,6 @@ func (r *RaftAdapter) RegisterEventHandler(eventType string, handler func(event 
 	return nil
 }
 
-// FSM implements raft.FSM and decodes log entries to typed events then dispatches.
-type FSM struct {
-	adapter *RaftAdapter
-}
-
-func (f *FSM) Apply(log *raft.Log) any {
-	var entry raftLogEntry
-	if err := json.Unmarshal(log.Data, &entry); err != nil {
-		return err
-	}
-	f.adapter.dispatch(entry.EventType, entry.Payload)
-	return nil
-}
-
-func (f *FSM) Snapshot() (raft.FSMSnapshot, error) { return &noopSnapshot{}, nil }
-func (f *FSM) Restore(rc io.ReadCloser) error      { return nil }
-
-type noopSnapshot struct{}
-
-func (n *noopSnapshot) Persist(sink raft.SnapshotSink) error { return sink.Close() }
-func (n *noopSnapshot) Release()                             {}
-
 // dispatch decodes payload by eventType and invokes handlers.
 func (r *RaftAdapter) dispatch(eventType string, payload json.RawMessage) {
 	switch eventType {
@@ -181,54 +191,4 @@ func eventTypeConstant(event any) string {
 	default:
 		return ""
 	}
-}
-
-// NewSingleNodeRaft initializes a single-node Raft for local testing.
-// dataDir must exist. bindAddr like "127.0.0.1:12000".
-func NewSingleNodeRaft(logger *slog.Logger, dataDir string, bindAddr string, serverID string) (*RaftAdapter, func(), error) {
-	cfg := raft.DefaultConfig()
-	cfg.LocalID = raft.ServerID(serverID)
-
-	logStore, err := raftboltdb.NewBoltStore(dataDir + "/raft-log.bolt")
-	if err != nil {
-		return nil, nil, err
-	}
-	stableStore, err := raftboltdb.NewBoltStore(dataDir + "/raft-stable.bolt")
-	if err != nil {
-		return nil, nil, err
-	}
-	snapshots, err := raft.NewFileSnapshotStore(dataDir, 3, os.Stderr)
-	if err != nil {
-		return nil, nil, err
-	}
-	transport, err := raft.NewTCPTransport(bindAddr, nil, 3, 10*time.Second, os.Stderr)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	adapter := NewRaftAdapter(logger, nil)
-	fsm := &FSM{adapter: adapter}
-	r, err := raft.NewRaft(cfg, fsm, logStore, stableStore, snapshots, transport)
-	if err != nil {
-		return nil, nil, err
-	}
-	adapter.raft = r
-
-	// Bootstrap if fresh
-	future := r.GetConfiguration()
-	if err := future.Error(); err != nil {
-		return nil, nil, err
-	}
-	if len(future.Configuration().Servers) == 0 {
-		cfg := raft.Configuration{Servers: []raft.Server{{ID: cfg.LocalID, Address: transport.LocalAddr()}}}
-		if err := r.BootstrapCluster(cfg).Error(); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	shutdown := func() {
-		r.Shutdown()
-		transport.Close()
-	}
-	return adapter, shutdown, nil
 }
