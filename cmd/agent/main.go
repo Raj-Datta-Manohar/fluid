@@ -42,10 +42,32 @@ func main() {
 			Seeds:          splitNonEmpty(os.Getenv("GOSSIP_SEEDS")),
 			RetransmitMult: 2,
 			KeyHex:         os.Getenv("GOSSIP_KEY_HEX"),
+			Compression:    os.Getenv("GOSSIP_COMPRESSION") == "1" || strings.ToLower(os.Getenv("GOSSIP_COMPRESSION")) == "true",
+			BatchSize:      1024,
+			MaxMessageSize: 512,
 		}
 		mg, shutdown, err := gml.New(logger, cfg, lc)
 		if err != nil {
 			logger.Error("memberlist init failed; falling back to in-memory gossip", "error", err)
+			g = gossip.NewInMemoryGossip(logger, lc)
+		} else {
+			g = mg
+			defer func() { _ = shutdown() }()
+		}
+	} else if os.Getenv("GOSSIP_IMPL") == "crdt" {
+		cfg := gml.Config{
+			NodeName:       os.Getenv("GOSSIP_NODE"),
+			BindAddr:       os.Getenv("GOSSIP_BIND"),
+			Seeds:          splitNonEmpty(os.Getenv("GOSSIP_SEEDS")),
+			RetransmitMult: 2,
+			KeyHex:         os.Getenv("GOSSIP_KEY_HEX"),
+			Compression:    os.Getenv("GOSSIP_COMPRESSION") == "1" || strings.ToLower(os.Getenv("GOSSIP_COMPRESSION")) == "true",
+			BatchSize:      1024,
+			MaxMessageSize: 512,
+		}
+		mg, shutdown, err := gml.NewCRDT(logger, cfg, lc)
+		if err != nil {
+			logger.Error("crdt gossip init failed; falling back to in-memory gossip", "error", err)
 			g = gossip.NewInMemoryGossip(logger, lc)
 		} else {
 			g = mg

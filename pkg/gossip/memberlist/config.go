@@ -13,4 +13,7 @@ type Config struct {
 	GossipInterval time.Duration
 	ProbeInterval  time.Duration
 	KeyHex         string // optional hex-encoded secret for keyring
+	Compression    bool   // enable message compression
+	BatchSize      int    // batch multiple messages
+	MaxMessageSize int    // max message size before compression
 }
