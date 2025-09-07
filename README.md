@@ -1,1 +1,1 @@
-# fluid
+# fluid: Gossip based Hybrid Service Discovery for Distributed systems
