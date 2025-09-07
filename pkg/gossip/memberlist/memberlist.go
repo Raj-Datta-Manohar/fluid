@@ -56,7 +56,7 @@ func New(logger *slog.Logger, cfg Config, lc cache.LocalCache) (gossip.GossipMem
 		mlCfg.Name = cfg.NodeName
 	}
 	if cfg.BindAddr != "" {
-		mlCfg.BindAddr, mlCfg.BindPort = parseAddr(cfg.BindAddr)
+		mlCfg.BindAddr, mlCfg.BindPort = ParseAddr(cfg.BindAddr)
 	}
 	if cfg.RetransmitMult > 0 {
 		mlCfg.RetransmitMult = cfg.RetransmitMult
@@ -215,8 +215,8 @@ func (s simpleBroadcast) Invalidates(other hmemberlist.Broadcast) bool { return 
 func (s simpleBroadcast) Message() []byte                              { return []byte(s) }
 func (s simpleBroadcast) Finished()                                    {}
 
-// parseAddr splits host:port into host and port int
-func parseAddr(addr string) (string, int) {
+// ParseAddr splits host:port into host and port int
+func ParseAddr(addr string) (string, int) {
 	var host string
 	var port int
 	fmt.Sscanf(addr, "%[^:]:%d", &host, &port)

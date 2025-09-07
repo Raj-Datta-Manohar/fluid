@@ -1,4 +1,4 @@
-package memberlist
+package crdt
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 
 	"github.com/raj/fluid/pkg/cache"
 	"github.com/raj/fluid/pkg/gossip"
-	"github.com/raj/fluid/pkg/gossip/crdt"
+	"github.com/raj/fluid/pkg/gossip/memberlist"
 	"github.com/raj/fluid/pkg/types"
 )
 
@@ -29,13 +29,13 @@ type crdtWireMsg struct {
 	Type    crdtMessageType         `json:"type"`
 	Name    string                  `json:"name"`
 	Payload []types.ServiceEndpoint `json:"payload,omitempty"`
-	State   *crdt.StateSnapshot     `json:"state,omitempty"`
+	State   *StateSnapshot          `json:"state,omitempty"`
 }
 
 type crdtGossip struct {
 	logger *slog.Logger
 	cache  cache.LocalCache
-	state  *crdt.State
+	state  *State
 
 	mu    sync.RWMutex
 	ml    *hmemberlist.Memberlist
@@ -43,7 +43,7 @@ type crdtGossip struct {
 }
 
 // NewCRDT creates a memberlist-based CRDT gossip implementation.
-func NewCRDT(logger *slog.Logger, cfg Config, lc cache.LocalCache) (gossip.GossipMemberlist, func() error, error) {
+func NewCRDT(logger *slog.Logger, cfg memberlist.Config, lc cache.LocalCache) (gossip.GossipMemberlist, func() error, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -56,7 +56,7 @@ func NewCRDT(logger *slog.Logger, cfg Config, lc cache.LocalCache) (gossip.Gossi
 	impl := &crdtGossip{
 		logger: logger.With("component", "gossip_crdt"),
 		cache:  lc,
-		state:  crdt.NewState(nodeID),
+		state:  NewState(nodeID),
 	}
 
 	mlCfg := hmemberlist.DefaultLANConfig()
@@ -64,7 +64,7 @@ func NewCRDT(logger *slog.Logger, cfg Config, lc cache.LocalCache) (gossip.Gossi
 		mlCfg.Name = cfg.NodeName
 	}
 	if cfg.BindAddr != "" {
-		mlCfg.BindAddr, mlCfg.BindPort = parseAddr(cfg.BindAddr)
+		mlCfg.BindAddr, mlCfg.BindPort = memberlist.ParseAddr(cfg.BindAddr)
 	}
 	if cfg.RetransmitMult > 0 {
 		mlCfg.RetransmitMult = cfg.RetransmitMult

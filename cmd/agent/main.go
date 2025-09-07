@@ -18,6 +18,7 @@ import (
 	"github.com/raj/fluid/pkg/cache"
 	"github.com/raj/fluid/pkg/consensus"
 	"github.com/raj/fluid/pkg/gossip"
+	"github.com/raj/fluid/pkg/gossip/crdt"
 	gml "github.com/raj/fluid/pkg/gossip/memberlist"
 	"github.com/raj/fluid/pkg/httpserver"
 	"github.com/raj/fluid/pkg/service"
@@ -65,7 +66,7 @@ func main() {
 			BatchSize:      1024,
 			MaxMessageSize: 512,
 		}
-		mg, shutdown, err := gml.NewCRDT(logger, cfg, lc)
+		mg, shutdown, err := crdt.NewCRDT(logger, cfg, lc)
 		if err != nil {
 			logger.Error("crdt gossip init failed; falling back to in-memory gossip", "error", err)
 			g = gossip.NewInMemoryGossip(logger, lc)
