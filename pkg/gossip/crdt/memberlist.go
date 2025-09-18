@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	hmemberlist "github.com/hashicorp/memberlist"
 
 	"github.com/raj/fluid/pkg/cache"
 	"github.com/raj/fluid/pkg/gossip"
 	"github.com/raj/fluid/pkg/gossip/memberlist"
+	"github.com/raj/fluid/pkg/metrics"
 	"github.com/raj/fluid/pkg/types"
 )
 
@@ -108,11 +110,28 @@ func NewCRDT(logger *slog.Logger, cfg memberlist.Config, lc cache.LocalCache) (g
 }
 
 func (g *crdtGossip) Lookup(ctx context.Context, serviceName string) ([]types.ServiceEndpoint, error) {
-	return g.state.Get(serviceName), nil
+	start := time.Now()
+	defer func() {
+		metrics.ObserveGossipOperationDuration("crdt_lookup", time.Since(start).Seconds())
+	}()
+
+	eps := g.state.Get(serviceName)
+	if len(eps) == 0 {
+		metrics.RecordGossipMessage("crdt_lookup", "miss")
+	} else {
+		metrics.RecordGossipMessage("crdt_lookup", "hit")
+	}
+	return eps, nil
 }
 
 func (g *crdtGossip) Upsert(ctx context.Context, serviceName string, endpoints []types.ServiceEndpoint) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveGossipOperationDuration("crdt_upsert", time.Since(start).Seconds())
+	}()
+
 	if serviceName == "" {
+		metrics.RecordGossipMessage("crdt_upsert", "invalid")
 		return errors.New("serviceName required")
 	}
 
@@ -120,28 +139,47 @@ func (g *crdtGossip) Upsert(ctx context.Context, serviceName string, endpoints [
 	g.state.Upsert(serviceName, endpoints)
 
 	// Update cache
-	g.cache.Put(serviceName, endpoints)
+	g.cache.Put(context.Background(), serviceName, endpoints)
 
-	// Broadcast update
+	// Broadcast update with size tracking
 	msg := crdtWireMsg{Type: crdtMsgUpsert, Name: serviceName, Payload: endpoints}
+	msgBytes, _ := json.Marshal(msg)
+	metrics.ObserveGossipMessageSize("crdt_upsert", float64(len(msgBytes)))
+
 	g.broadcast(msg)
+	metrics.RecordGossipMessage("crdt_upsert", "success")
 	return nil
 }
 
 func (g *crdtGossip) Remove(ctx context.Context, serviceName string) error {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveGossipOperationDuration("crdt_remove", time.Since(start).Seconds())
+	}()
+
 	if serviceName == "" {
+		metrics.RecordGossipMessage("crdt_remove", "invalid")
 		return errors.New("serviceName required")
 	}
 
 	// Update CRDT state
-	g.state.Remove(serviceName)
+	existed := g.state.Remove(serviceName)
 
 	// Update cache
-	g.cache.Remove(serviceName)
+	g.cache.Remove(context.Background(), serviceName)
 
 	// Broadcast removal
 	msg := crdtWireMsg{Type: crdtMsgRemove, Name: serviceName}
+	msgBytes, _ := json.Marshal(msg)
+	metrics.ObserveGossipMessageSize("crdt_remove", float64(len(msgBytes)))
+
 	g.broadcast(msg)
+
+	if existed {
+		metrics.RecordGossipMessage("crdt_remove", "success")
+	} else {
+		metrics.RecordGossipMessage("crdt_remove", "not_found")
+	}
 	return nil
 }
 
@@ -149,17 +187,17 @@ func (g *crdtGossip) apply(msg crdtWireMsg) {
 	switch msg.Type {
 	case crdtMsgUpsert:
 		g.state.Upsert(msg.Name, msg.Payload)
-		g.cache.Put(msg.Name, msg.Payload)
+		g.cache.Put(context.Background(), msg.Name, msg.Payload)
 	case crdtMsgRemove:
 		g.state.Remove(msg.Name)
-		g.cache.Remove(msg.Name)
+		g.cache.Remove(context.Background(), msg.Name)
 	case crdtMsgState:
 		if msg.State != nil {
 			g.state.MergeRemoteState(msg.State)
 			// Update cache with merged state
 			allServices := g.state.AllServices()
 			for name, eps := range allServices {
-				g.cache.Put(name, eps)
+				g.cache.Put(context.Background(), name, eps)
 			}
 		}
 	}

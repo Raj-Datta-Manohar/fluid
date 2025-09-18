@@ -53,7 +53,7 @@ func (g *InMemoryGossip) Upsert(ctx context.Context, serviceName string, endpoin
 	g.entries[serviceName] = cp
 	g.mu.Unlock()
 	// Backfill Tier 1 cache
-	g.cache.Put(serviceName, cp)
+	g.cache.Put(ctx, serviceName, cp)
 	return nil
 }
 
@@ -64,6 +64,6 @@ func (g *InMemoryGossip) Remove(ctx context.Context, serviceName string) error {
 	g.mu.Lock()
 	delete(g.entries, serviceName)
 	g.mu.Unlock()
-	g.cache.Remove(serviceName)
+	g.cache.Remove(ctx, serviceName)
 	return nil
 }

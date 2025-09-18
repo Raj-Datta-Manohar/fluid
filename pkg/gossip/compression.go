@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+
+	"github.com/raj/fluid/pkg/metrics"
 )
 
 // compressMessage compresses a message if it exceeds maxSize.
@@ -16,13 +18,18 @@ func compressMessage(data []byte, maxSize int) ([]byte, bool) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write(data); err != nil {
+		metrics.SetGossipCompressionRatio("error", 1.0)
 		return data, false
 	}
 	if err := gz.Close(); err != nil {
+		metrics.SetGossipCompressionRatio("error", 1.0)
 		return data, false
 	}
 
 	compressed := buf.Bytes()
+	ratio := float64(len(compressed)) / float64(len(data))
+	metrics.SetGossipCompressionRatio("gzip", ratio)
+
 	if len(compressed) < len(data) {
 		return compressed, true
 	}

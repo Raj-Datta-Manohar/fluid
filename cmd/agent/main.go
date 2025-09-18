@@ -22,6 +22,7 @@ import (
 	gml "github.com/raj/fluid/pkg/gossip/memberlist"
 	"github.com/raj/fluid/pkg/httpserver"
 	"github.com/raj/fluid/pkg/service"
+	"github.com/raj/fluid/pkg/tracing"
 	"github.com/raj/fluid/pkg/types"
 )
 
@@ -29,6 +30,13 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Tracing init (stdout exporter if OTEL_TRACING_STDOUT=1)
+	if shutdown, err := tracing.Init(ctx, logger); err == nil {
+		defer func() { _ = shutdown(context.Background()) }()
+	} else {
+		logger.Warn("tracing init failed", "error", err)
+	}
 
 	// Tier 1
 	lc := cache.NewInMemoryCache(logger, 10*time.Second, 1*time.Second)
@@ -126,7 +134,7 @@ func main() {
 	if adapter, ok := cc.(*consensus.RaftAdapter); ok {
 		state := adapter.StateSnapshot()
 		for name, eps := range state {
-			lc.Put(name, eps)
+			lc.Put(ctx, name, eps)
 		}
 	}
 

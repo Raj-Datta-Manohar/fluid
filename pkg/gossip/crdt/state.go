@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/raj/fluid/pkg/metrics"
 	"github.com/raj/fluid/pkg/types"
 )
 
@@ -26,6 +27,11 @@ func NewState(nodeID string) *State {
 
 // Upsert updates or creates a service with CRDT semantics.
 func (s *State) Upsert(serviceName string, endpoints []types.ServiceEndpoint) {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveGossipOperationDuration("crdt_state_upsert", time.Since(start).Seconds())
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -43,29 +49,60 @@ func (s *State) Upsert(serviceName string, endpoints []types.ServiceEndpoint) {
 		reg.Clock[k] = v
 	}
 
+	_, exists := s.state[serviceName]
 	s.state[serviceName] = reg
+
+	if exists {
+		metrics.RecordGossipMessage("crdt_state", "update")
+	} else {
+		metrics.RecordGossipMessage("crdt_state", "create")
+	}
+
+	// Track CRDT state size
+	stateSize := s.calculateStateSize()
+	metrics.ObserveGossipMessageSize("crdt_state", float64(stateSize))
+}
+
+// calculateStateSize returns the approximate size of the CRDT state in bytes
+func (s *State) calculateStateSize() int {
+	size := 0
+	for name, reg := range s.state {
+		size += len(name)
+		size += len(reg.NodeID)
+		for _, ep := range reg.Value {
+			size += len(ep.IP) + 8 // 8 bytes for port
+		}
+		for k := range reg.Clock {
+			size += len(k) + 8 // 8 bytes for counter
+		}
+	}
+	return size
 }
 
 // Remove deletes a service.
-func (s *State) Remove(serviceName string) {
+func (s *State) Remove(serviceName string) bool {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveGossipOperationDuration("crdt_state_remove", time.Since(start).Seconds())
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
+	_, exists := s.state[serviceName]
+	delete(s.state, serviceName)
 	s.clock[s.nodeID]++
 
-	reg := &LWWRegister{
-		Value:     nil, // nil indicates deletion
-		Timestamp: now,
-		Clock:     make(VectorClock),
-		NodeID:    s.nodeID,
-	}
-	// Copy clock state
-	for k, v := range s.clock {
-		reg.Clock[k] = v
+	if exists {
+		metrics.RecordGossipMessage("crdt_state", "remove")
+		// Track CRDT state size after removal
+		stateSize := s.calculateStateSize()
+		metrics.ObserveGossipMessageSize("crdt_state", float64(stateSize))
+	} else {
+		metrics.RecordGossipMessage("crdt_state", "remove_not_found")
 	}
 
-	s.state[serviceName] = reg
+	return exists
 }
 
 // Get retrieves a service if present and not deleted.
@@ -86,6 +123,11 @@ func (s *State) Get(serviceName string) []types.ServiceEndpoint {
 
 // MergeRemoteState merges a remote state snapshot.
 func (s *State) MergeRemoteState(snapshot *StateSnapshot) {
+	start := time.Now()
+	defer func() {
+		metrics.ObserveGossipOperationDuration("crdt_state_merge", time.Since(start).Seconds())
+	}()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

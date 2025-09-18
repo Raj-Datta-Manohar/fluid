@@ -7,6 +7,7 @@ import (
 
 	raft "github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
+	"github.com/raj/fluid/pkg/metrics"
 )
 
 // NewSingleNodeRaft initializes a single-node Raft for local testing.
@@ -48,10 +49,25 @@ func NewSingleNodeRaft(logger *slog.Logger, dataDir string, bindAddr string, ser
 	fsm := &FSM{adapter: adapter}
 	r, err := raft.NewRaft(cfg, fsm, logStore, stableStore, snapshots, transport)
 	if err != nil {
+		metrics.RecordRaftOperation("bootstrap", "raft_error")
 		return nil, nil, err
 	}
 	adapter.raft = r
 	adapter.fsm = fsm
+
+	// Monitor leadership changes
+	observer := raft.NewObserver(make(chan raft.Observation, 1), false,
+		func(o *raft.Observation) bool {
+			switch o.Data.(type) {
+			case raft.LeaderObservation:
+				metrics.IncrementRaftLeaderChanges()
+				metrics.RecordRaftOperation("leadership", "change")
+				return true
+			}
+			return false
+		})
+	r.RegisterObserver(observer)
+	metrics.RecordRaftOperation("bootstrap", "success")
 
 	// Bootstrap if requested and fresh
 	future := r.GetConfiguration()

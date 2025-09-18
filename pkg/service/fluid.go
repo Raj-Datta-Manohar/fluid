@@ -6,9 +6,16 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/raj/fluid/pkg/cache"
 	"github.com/raj/fluid/pkg/consensus"
 	"github.com/raj/fluid/pkg/gossip"
+	"github.com/raj/fluid/pkg/metrics"
+	"github.com/raj/fluid/pkg/tracing"
 	"github.com/raj/fluid/pkg/types"
 )
 
@@ -38,26 +45,40 @@ func (s *FluidService) LookupService(ctx context.Context, name string) ([]types.
 		return nil, errors.New("service name is required")
 	}
 	start := time.Now()
-	endpoints, _ := s.cache.Get(name)
+
+	tracer := otel.Tracer(tracing.TracerService)
+	spanCtx, span := tracer.Start(ctx, tracing.SpanServiceLookup, trace.WithSpanKind(trace.SpanKindServer))
+	defer span.End()
+
+	span.SetAttributes(attribute.String("service.name", name))
+
+	endpoints, _ := s.cache.Get(spanCtx, name)
 	if len(endpoints) > 0 {
-		// metrics.cacheHits.Inc()
+		metrics.RecordServiceLookup(metrics.ServiceOpLookup, metrics.ServiceResultCacheHit)
+		metrics.ObserveServiceLookupDuration(metrics.ServiceOpLookup, time.Since(start).Seconds())
+		span.SetAttributes(attribute.Int("service.endpoints_count", len(endpoints)))
+		span.SetStatus(codes.Ok, "")
 		return endpoints, nil
 	}
-	// metrics.cacheMisses.Inc()
+	metrics.RecordServiceLookup(metrics.ServiceOpLookup, metrics.ServiceResultCacheMiss)
 	if s.gossip != nil {
 		// Best-effort query Tier 2 on exceptional miss.
-		gCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		gCtx, cancel := context.WithTimeout(spanCtx, 200*time.Millisecond)
 		defer cancel()
 		fromGossip, err := s.gossip.Lookup(gCtx, name)
 		if err == nil && len(fromGossip) > 0 {
 			// Opportunistically warm the cache.
-			s.cache.Put(name, fromGossip)
-			// metrics.cacheBackfill.Inc()
+			s.cache.Put(spanCtx, name, fromGossip)
+			metrics.RecordServiceLookup(metrics.ServiceOpLookup, metrics.ServiceResultGossipBackfill)
+			metrics.ObserveServiceLookupDuration(metrics.ServiceOpLookup, time.Since(start).Seconds())
+			span.SetAttributes(attribute.Int("service.endpoints_count", len(fromGossip)))
+			span.SetStatus(codes.Ok, "")
 			return fromGossip, nil
 		}
 	}
-	// metrics.lookupErrors.Inc()
-	_ = start // placeholder to potentially emit histograms: metrics.lookupLatency.Observe(time.Since(start).Seconds())
+	metrics.RecordServiceLookup(metrics.ServiceOpLookup, metrics.ServiceResultNotFound)
+	metrics.ObserveServiceLookupDuration(metrics.ServiceOpLookup, time.Since(start).Seconds())
+	span.SetStatus(codes.Error, "service not found")
 	return nil, nil
 }
 
@@ -76,7 +97,7 @@ func (s *FluidService) CreateApp(ctx context.Context, appID, ip string) error {
 	for attempt := 0; attempt < 5; attempt++ {
 		if err := s.consensusClient.ProposeEvent(ctx, ev); err != nil {
 			if ne, notLeader := consensus.IsNotLeader(err); notLeader {
-				// metrics.consensusRedirects.Inc()
+				metrics.IncrementServiceConsensusRedirects()
 				if ne.LeaderAddr != "" {
 					s.logger.Info("redirecting to leader", "leader", ne.LeaderAddr)
 				}
